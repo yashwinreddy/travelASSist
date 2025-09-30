@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Travel Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="chat-container">
+    <h1>🗺️ Travel Assistant</h1>
+
+    <!-- Chat messages -->
+    <div id="chat-box" class="chat-box"></div>
+
+    <!-- Input row -->
+    <div class="chat-input-container">
+      <input id="chat-input" type="text" placeholder="Ask about routes, traffic, weather...">
+      <button id="send-btn" onclick="sendMessage()">Send</button>
+    </div>
+
+    <!-- Location status -->
+    <p id="location-status">📍 Detecting your location...</p>
+  </div>
+
+  <!-- Attach JS -->
+  <script src="/static/script.js"></script>
+</body>
+</html>
