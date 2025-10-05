@@ -1,2 +1,4 @@
-# travelASSist
-check out ya journey before u Xperience it
+# travel assist
+check out ya journey before u xperience it
+
+Travel Assistant is an AI-powered, real-time conversational companion designed to assist users during travel by combining live route planning, weather forecasting, and traffic intelligence in a single chat-based interface. It seamlessly integrates data from the Google Maps Directions and Geocoding APIs, as well as the OpenWeather API, to generate comprehensive journey insights — including distance, ETA, alternate routes, weather forecasts en route, and live traffic conditions. The system automatically caches API responses in Redis or in-memory to minimize redundant calls and reduce AI token usage, making it both cost-efficient and intelligent. When a user asks a query like “How long to reach Hitec City by bike?”, the system retrieves or computes all relevant contextual data (routes, traffic zones, weather), stores them in cache, and then uses OpenAI to generate a human-like, context-aware response — also considering the user’s live location updates as they move. Every subsequent question dynamically uses cached or updated location data to avoid unnecessary API hits. This version is architected for full production behavior but requires active API keys with billing enabled for Google Maps and OpenWeather to function in real time

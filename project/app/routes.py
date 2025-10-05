@@ -1,142 +1,75 @@
-# app/routes.py
-from fastapi import APIRouter, Query, HTTPException
-import requests
+# routes.py
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from app.cache_manager import CacheManager
+from app.api_client import MapsClient, WeatherClient
+from app.llm_client import LLMClient
 import time
+import uuid
 
 router = APIRouter()
 
-# Simple in-memory cache
-CACHE = {}
-CACHE_TTL = 1800  # 30 mins
+cache = CacheManager()
+maps_client = MapsClient()
+weather_client = WeatherClient()
+llm_client = LLMClient()
 
-# API Keys (replace with env vars in prod)
-GOOGLE_MAPS_API_KEY = "YOUR_GOOGLE_MAPS_API_KEY"
-OPENWEATHER_API_KEY = "YOUR_OPENWEATHER_API_KEY"
+@router.post("/chat")
+async def chat_endpoint(request: Request):
+    """
+    Receives: {user_id, query, lat, lng, timestamp}
+    Returns: {text, snapshot_id}
+    """
+    data = await request.json()
+    user_id = data.get("user_id") or str(uuid.uuid4())
+    query = data.get("query")
+    lat = data.get("lat")
+    lng = data.get("lng")
+    timestamp = data.get("timestamp") or time.time()
 
+    # 1. Check if session exists
+    session = cache.get_user_session(user_id)
 
-def is_cache_valid(entry: dict) -> bool:
-    """Check if cache entry is still valid."""
-    return time.time() - entry["timestamp"] < CACHE_TTL
+    # 2. Determine whether to reuse snapshot
+    snapshot_id = None
+    snapshot_data = None
+    if session:
+        last_snapshot_id = session.get("last_snapshot_id")
+        if last_snapshot_id:
+            snapshot_data = cache.get_snapshot(last_snapshot_id)
+            # You can add bounding box / route segment check here for partial reuse
+            snapshot_id = last_snapshot_id
 
-
-def fetch_weather(destination: str) -> dict:
-    """Fetch weather info for a destination using Google Geocode + OpenWeather."""
-    geocode_url = "https://maps.googleapis.com/maps/api/geocode/json"
-    geo_res = requests.get(
-        geocode_url, params={"address": destination, "key": GOOGLE_MAPS_API_KEY}
-    ).json()
-
-    if geo_res.get("status") != "OK":
-        return {"error": "Could not fetch coordinates for weather"}
-
-    dest_loc = geo_res["results"][0]["geometry"]["location"]
-    dest_lat, dest_lng = dest_loc["lat"], dest_loc["lng"]
-
-    weather_url = "http://api.openweathermap.org/data/2.5/weather"
-    weather_params = {
-        "lat": dest_lat,
-        "lon": dest_lng,
-        "appid": OPENWEATHER_API_KEY,
-        "units": "metric",
-    }
-    weather_res = requests.get(weather_url, params=weather_params).json()
-
-    if "weather" not in weather_res or "main" not in weather_res:
-        return {"error": "Weather API failed"}
-
-    return {
-        "status": weather_res["weather"][0]["description"],
-        "temperature": f"{weather_res['main']['temp']}°C",
-    }
-
-
-def fetch_routes(origin: str, destination: str) -> dict:
-    """Fetch routes for driving, walking, cycling."""
-    base_url = "https://maps.googleapis.com/maps/api/directions/json"
-    modes = ["driving", "walking", "bicycling"]
-    routes_data = {}
-
-    for mode in modes:
-        params = {
-            "origin": origin,
+    # 3. If no valid snapshot, fetch fresh data
+    if not snapshot_data:
+        # For simplicity, assume user wants a fixed destination in this demo
+        destination = query  # in real, parse intent with LLM
+        route_data = maps_client.get_directions(lat, lng, destination)
+        weather_data = weather_client.get_weather(destination)
+        snapshot_data = {
+            "snapshot_id": str(uuid.uuid4()),
+            "origin": {"lat": lat, "lng": lng},
             "destination": destination,
-            "mode": mode,
-            "alternatives": "true",
-            "departure_time": "now",  # enables traffic info
-            "key": GOOGLE_MAPS_API_KEY,
+            "routes": route_data,
+            "weather": weather_data,
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         }
-        res = requests.get(base_url, params=params).json()
+        snapshot_id = snapshot_data["snapshot_id"]
+        cache.save_snapshot(snapshot_id, snapshot_data)
 
-        if res.get("status") != "OK":
-            routes_data[mode] = {"error": res.get("status", "Unknown error")}
-            continue
+    # 4. Update user session
+    cache.update_user_session(user_id, {
+        "last_snapshot_id": snapshot_id,
+        "last_location": {"lat": lat, "lng": lng},
+        "last_query": query,
+        "timestamp": timestamp
+    })
 
-        # Always take first route as main
-        leg = res["routes"][0]["legs"][0]
-        distance = leg["distance"]["text"]
-        duration = leg["duration"]["text"]
+    # 5. Call LLM to generate user-friendly response
+    response_text = llm_client.generate_response(query, snapshot_data)
 
-        # Traffic-aware duration (driving only)
-        traffic = None
-        if mode == "driving" and "duration_in_traffic" in leg:
-            duration = leg["duration_in_traffic"]["text"]
-            traffic = "Traffic considered"
-
-        # Collect alternates (driving only)
-        alternates = []
-        if mode == "driving" and len(res["routes"]) > 1:
-            for alt in res["routes"][1:]:
-                alt_leg = alt["legs"][0]
-                alternates.append({
-                    "via": alt.get("summary", "Unnamed Road"),
-                    "distance": alt_leg["distance"]["text"],
-                    "duration": alt_leg["duration"]["text"],
-                })
-
-        routes_data[mode] = {
-            "distance": distance,
-            "duration": duration,
-            "traffic": traffic,
-            "alternates": alternates,
-        }
-
-    return routes_data
-
-
-@router.get("/route-info")
-def get_route_info(
-    origin_lat: float = Query(..., description="Origin latitude"),
-    origin_lng: float = Query(..., description="Origin longitude"),
-    destination: str = Query(..., description="Destination address or place"),
-):
-    """
-    Get route information for driving, walking, cycling
-    + traffic + alternate routes + destination weather.
-    Cached for 30 minutes to reduce API calls.
-    """
-
-    origin = f"{origin_lat},{origin_lng}"
-    cache_key = f"{origin}->{destination.lower()}"
-
-    # Serve from cache if available
-    if cache_key in CACHE and is_cache_valid(CACHE[cache_key]):
-        return {"source": "cache", **CACHE[cache_key]["data"]}
-
-    try:
-        routes_data = fetch_routes(origin, destination)
-        weather_info = fetch_weather(destination)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upstream API error: {str(e)}")
-
-    response = {
-        "origin": origin,
-        "destination": destination,
-        "routes": routes_data,
-        "weather": weather_info,
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-    }
-
-    # Save to cache
-    CACHE[cache_key] = {"data": response, "timestamp": time.time()}
-
-    return {"source": "api", **response}
+    return JSONResponse({
+        "text": response_text,
+        "snapshot_id": snapshot_id,
+        "user_id": user_id
+    })
